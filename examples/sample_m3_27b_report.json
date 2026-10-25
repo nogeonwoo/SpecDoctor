@@ -1,0 +1,103 @@
+{
+  "hardware_info": {
+    "platform_name": "Darwin",
+    "chip_name": "Apple M3",
+    "is_apple_silicon": true,
+    "total_ram_gb": 24.0,
+    "gpu_cores": 10,
+    "theoretical_bw_gbps": 100.0,
+    "os_version": "26.3.1"
+  },
+  "target_info": {
+    "model_path": "/Users/ani/Ai_Agent/models/Ternary-Bonsai-2-27B-PQ2_0.gguf",
+    "model_type": "qwen35 27B PQ2_0 - 2.13 bpw (group 128)",
+    "model_size_gb": 6.700910568237305,
+    "m1_latency_ms": 117.349812,
+    "m1_tps": 8.521531
+  },
+  "drafter_info": {
+    "model_path": "/Users/ani/Ai_Agent/models/Ternary-Bonsai-2-27B-DFlash2-ft5-asym-Q2_K-FC-FullRank.gguf",
+    "drafter_type": "dflash_parallel",
+    "td_ms": 23.97
+  },
+  "k_analysis": {
+    "1": {
+      "k": 1,
+      "batch_m_used": 2,
+      "t_d_ms": 23.97,
+      "t_v_ms": 137.78,
+      "cycle_time_ms": 161.75,
+      "delta_tv_ms": 20.43,
+      "alpha_break_even": 0.3783,
+      "alpha_break_even_pct": 37.8,
+      "can_ever_accelerate": true,
+      "speedup_at_50_pct": 8.8,
+      "speedup_at_70_pct": 23.3,
+      "speedup_at_80_pct": 30.6,
+      "speedup_at_90_pct": 37.8,
+      "speedup_at_thinking_15_pct": -16.6
+    },
+    "2": {
+      "k": 2,
+      "batch_m_used": 3,
+      "t_d_ms": 23.97,
+      "t_v_ms": 284.79,
+      "cycle_time_ms": 308.76,
+      "delta_tv_ms": 167.44,
+      "alpha_break_even": 0.8155,
+      "alpha_break_even_pct": 81.6,
+      "can_ever_accelerate": true,
+      "speedup_at_50_pct": -33.5,
+      "speedup_at_70_pct": -16.8,
+      "speedup_at_80_pct": -7.3,
+      "speedup_at_90_pct": 3.0,
+      "speedup_at_thinking_15_pct": -55.4
+    },
+    "3": {
+      "k": 3,
+      "batch_m_used": 4,
+      "t_d_ms": 23.97,
+      "t_v_ms": 228.11,
+      "cycle_time_ms": 252.08,
+      "delta_tv_ms": 110.76,
+      "alpha_break_even": 0.3827,
+      "alpha_break_even_pct": 38.3,
+      "can_ever_accelerate": true,
+      "speedup_at_50_pct": -12.7,
+      "speedup_at_70_pct": 17.9,
+      "speedup_at_80_pct": 37.4,
+      "speedup_at_90_pct": 60.1,
+      "speedup_at_thinking_15_pct": -45.3
+    },
+    "4": {
+      "k": 4,
+      "batch_m_used": 5,
+      "t_d_ms": 23.97,
+      "t_v_ms": 809.03,
+      "cycle_time_ms": 833.0,
+      "delta_tv_ms": 691.68,
+      "alpha_break_even": 1.5246,
+      "alpha_break_even_pct": 152.5,
+      "can_ever_accelerate": false,
+      "speedup_at_50_pct": -72.7,
+      "speedup_at_70_pct": -60.9,
+      "speedup_at_80_pct": -52.6,
+      "speedup_at_90_pct": -42.3,
+      "speedup_at_thinking_15_pct": -83.4
+    }
+  },
+  "optimal_k_at_75_pct": 3,
+  "recommended_k_max": 3,
+  "critical_alpha_threshold": 0.3827,
+  "critical_alpha_threshold_pct": 38.3,
+  "thinking_mode_speedup_loss_pct": -45.3,
+  "simd_anomalies": [
+    "Apple Silicon 3-Wide SIMD Penalty: M=3 (284.8ms) is SLOWER than M=4 (228.1ms). Avoid K=2!"
+  ],
+  "prescriptions": [
+    "\u2705 Break-Even Gate: Only engage speculative decoding when live acceptance \u03b1 > 38.3%.",
+    "\ud83c\udfaf Recommended Draft Length: Set --spec-draft-n-max 3 (Peak net speedup: +37.4% at \u03b1=80%).",
+    "\u26a0\ufe0f Apple Silicon Vectorization Rule: Strictly avoid K=2 due to 3-wide SIMD register stall. Use K=3 or K=4.",
+    "\ud83e\udde0 Thinking Mode Protection: During <think> blocks (\u03b1 \u2248 10~15%), speculative decoding causes a -45.3% SLOWDOWN. Lock K=0 or employ an adaptive arbiter/circuit breaker to prevent degradation."
+  ]
+}

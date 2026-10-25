@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "spec-doctor"
+version = "0.1.0"
+authors = [
+  { name="Ai_Agent Engineering" },
+]
+description = "On-Device Speculative Decoding Roofline & Hardware Diagnostic Engine"
+readme = "README.md"
+requires-python = ">=3.9"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+]
+dependencies = []
+
+[project.scripts]
+spec-doctor = "spec_doctor.cli:main"
