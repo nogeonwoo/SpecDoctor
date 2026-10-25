@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "spec-doctor"
 version = "0.1.0"
 authors = [
-  { name="Ai_Agent Engineering" },
+  { name="Geonwoo No", email="rjsdnshxmqnr@gmail.com" },
 ]
 description = "On-Device Speculative Decoding Roofline & Hardware Diagnostic Engine"
 readme = "README.md"

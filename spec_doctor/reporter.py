@@ -19,7 +19,7 @@ class SpecReporter:
         thin_border = "-" * 80
 
         lines.append(border)
-        lines.append("🏥 [SpecDoctor] Speculative Decoding Roofline & Hardware Diagnostic Report")
+        lines.append("[SpecDoctor] Speculative Decoding Roofline & Hardware Diagnostic")
         lines.append(border)
 
         # 1. Hardware Profile
@@ -55,7 +55,7 @@ class SpecReporter:
         if report.simd_anomalies:
             lines.append("")
             for anom in report.simd_anomalies:
-                lines.append(f"  ⚡ [SIMD WARNING] {anom}")
+                lines.append(f"  [SIMD Warning] {anom}")
         lines.append("")
 
         # 4. Break-Even Analysis Table
@@ -82,7 +82,7 @@ class SpecReporter:
 
         # 5. Prescriptions & Actionable Verdict
         lines.append(thin_border)
-        lines.append("📋 [Prescription & Actionable Optimization Guidelines]")
+        lines.append("[5. Diagnostic Summary & Guidelines]")
         lines.append(thin_border)
         for p in report.prescriptions:
             lines.append(f"  • {p}")
@@ -91,7 +91,7 @@ class SpecReporter:
         # Recommended command line
         tgt_file = tgt.get('model_path', 'target.gguf')
         dft_file = dft.get('model_path', 'draft.gguf') or "draft.gguf"
-        lines.append("🚀 [Recommended Production Command Line]")
+        lines.append("[Recommended CLI Command]")
         lines.append(
             f"  ./bin/llama-cli -m {tgt_file} \\\n"
             f"                  -md {dft_file} \\\n"

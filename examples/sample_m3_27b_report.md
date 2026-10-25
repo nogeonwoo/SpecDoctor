@@ -1,6 +1,6 @@
 ```text
 ================================================================================
-🏥 [SpecDoctor] Speculative Decoding Roofline & Hardware Diagnostic Report
+[SpecDoctor] Speculative Decoding Roofline & Hardware Diagnostic
 ================================================================================
 [1. Hardware & Physical Memory Bandwidth]
   • Device / Chip     : Apple M3 (10 GPU Cores)
@@ -24,7 +24,7 @@
   M=4        | 228.11         | 4.38         | +110.76 ms     | +94.4%      
   M=5        | 809.03         | 1.24         | +691.68 ms     | +589.4%     
 
-  ⚡ [SIMD WARNING] Apple Silicon 3-Wide SIMD Penalty: M=3 (284.8ms) is SLOWER than M=4 (228.1ms). Avoid K=2!
+  [SIMD Warning] Apple Silicon 3-Wide SIMD Penalty: M=3 (284.8ms) is SLOWER than M=4 (228.1ms). Avoid K=2!
 
 [4. Speculative Break-Even & Net Acceleration Matrix]
   Draft (K)  | Cycle Time   | Break-Even α   | Speedup (α=70%)  | Speedup (α=80%)  | Think Mode (α=15%)
@@ -36,16 +36,16 @@
   (* denotes recommended optimal configuration)
 
 --------------------------------------------------------------------------------
-📋 [Prescription & Actionable Optimization Guidelines]
+[5. Diagnostic Summary & Guidelines]
 --------------------------------------------------------------------------------
-  • ✅ Break-Even Gate: Only engage speculative decoding when live acceptance α > 38.3%.
-  • 🎯 Recommended Draft Length: Set --spec-draft-n-max 3 (Peak net speedup: +37.4% at α=80%).
-  • ⚠️ Apple Silicon Vectorization Rule: Strictly avoid K=2 due to 3-wide SIMD register stall. Use K=3 or K=4.
-  • 🧠 Thinking Mode Protection: During <think> blocks (α ≈ 10~15%), speculative decoding causes a -45.3% SLOWDOWN. Lock K=0 or employ an adaptive arbiter/circuit breaker to prevent degradation.
+  • Break-even acceptance rate: Speculative decoding requires alpha > 38.3% to be net-positive.
+  • Recommended draft length: Set --spec-draft-n-max 3 (Projected speedup: +37.4% at alpha=80%).
+  • SIMD Vectorization constraint: Avoid K=2 due to Apple Silicon 3-wide register penalty. Prefer K=3 or K=4.
+  • Reasoning (<think>) Mode: At alpha ~ 10-15%, unmanaged speculative decoding causes a -45.3% slowdown. Lock K=0 or enable dynamic circuit breaker during thinking generation.
 
-🚀 [Recommended Production Command Line]
-  ./bin/llama-cli -m /Users/ani/Ai_Agent/models/Ternary-Bonsai-2-27B-PQ2_0.gguf \
-                  -md /Users/ani/Ai_Agent/models/Ternary-Bonsai-2-27B-DFlash2-ft5-asym-Q2_K-FC-FullRank.gguf \
+[Recommended CLI Command]
+  ./bin/llama-cli -m models/Ternary-Bonsai-2-27B-PQ2_0.gguf \
+                  -md models/Ternary-Bonsai-2-27B-DFlash2-ft5-asym-Q2_K-FC-FullRank.gguf \
                   --spec-draft-n-max 3 \
                   -ngl 999 -ngld 999 -t 4 --temp 0.0
 ================================================================================

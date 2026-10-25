@@ -170,23 +170,23 @@ def analyze_speculative_dynamics(
     prescriptions = []
     if crit_alpha >= 1.0:
         prescriptions.append(
-            "🛑 CRITICAL: Drafter latency + verification overhead exceed target decode time. "
-            "Speculative decoding CANNOT accelerate this model on this hardware (all α produce negative speedup)."
+            "Critical: Drafter latency and target batch overhead exceed baseline single-token decode time. "
+            "Speculative decoding cannot accelerate this model on this hardware configuration."
         )
     else:
         prescriptions.append(
-            f"✅ Break-Even Gate: Only engage speculative decoding when live acceptance α > {crit_alpha * 100:.1f}%."
+            f"Break-even acceptance rate: Speculative decoding requires alpha > {crit_alpha * 100:.1f}% to be net-positive."
         )
         prescriptions.append(
-            f"🎯 Recommended Draft Length: Set --spec-draft-n-max {rec_k} (Peak net speedup: +{k_points[rec_k].speedup_at_80_pct * 100:.1f}% at α=80%)."
+            f"Recommended draft length: Set --spec-draft-n-max {rec_k} (Projected speedup: +{k_points[rec_k].speedup_at_80_pct * 100:.1f}% at alpha=80%)."
         )
         if any("M=3" in a for a in profile.simd_anomaly_flags):
             prescriptions.append(
-                "⚠️ Apple Silicon Vectorization Rule: Strictly avoid K=2 due to 3-wide SIMD register stall. Use K=3 or K=4."
+                "SIMD Vectorization constraint: Avoid K=2 due to Apple Silicon 3-wide register penalty. Prefer K=3 or K=4."
             )
         prescriptions.append(
-            f"🧠 Thinking Mode Protection: During <think> blocks (α ≈ 10~15%), speculative decoding causes a {think_loss:.1f}% SLOWDOWN. "
-            "Lock K=0 or employ an adaptive arbiter/circuit breaker to prevent degradation."
+            f"Reasoning (<think>) Mode: At alpha ~ 10-15%, unmanaged speculative decoding causes a {think_loss:.1f}% slowdown. "
+            "Lock K=0 or enable dynamic circuit breaker during thinking generation."
         )
 
     return DiagnosticReport(
