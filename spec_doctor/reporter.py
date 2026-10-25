@@ -43,41 +43,57 @@ class SpecReporter:
 
         # 3. Target Verification Batch Scaling Table
         lines.append("[3. Target Batch Verification Scaling Cost (M=1..8)]")
-        lines.append(f"  {'Batch (M)':<10} | {'Latency (ms)':<14} | {'TPS (tok/s)':<12} | {'Delta vs M=1':<14} | {'Overhead (%)':<12}")
-        lines.append(f"  {'-'*10}-|-{'-'*14}-|-{'-'*12}-|-{'-'*14}-|-{'-'*12}")
+        lines.append(
+            f"  {'Batch (M)':<10} | {'Latency (ms)':<14} | {'TPS (tok/s)':<12} | "
+            f"{'Achieved BW':<14} | {'Delta vs M=1':<14} | {'Overhead (%)':<12}"
+        )
+        lines.append(
+            f"  {'-'*10}-|-{'-'*14}-|-{'-'*12}-|-{'-'*14}-|-{'-'*14}-|-{'-'*12}"
+        )
 
-        # Extract points from report's k_analysis
+        model_sz = tgt.get('model_size_gb', 0.0)
+        seen_batches = set()
         for k, pt in sorted(report.k_analysis.items()):
+            if pt.batch_m_used in seen_batches:
+                continue
+            seen_batches.add(pt.batch_m_used)
             delta_str = f"+{pt.delta_tv_ms:.2f} ms"
             ovh_str = f"+{(pt.delta_tv_ms / tgt.get('m1_latency_ms', 1.0) * 100):.1f}%"
-            lines.append(f"  M={pt.batch_m_used:<8} | {pt.t_v_ms:<14.2f} | {1000/pt.t_v_ms:<12.2f} | {delta_str:<14} | {ovh_str:<12}")
+            bw_str = f"{(model_sz / (pt.t_v_ms / 1000.0)):.1f} GB/s" if pt.t_v_ms > 0 else "N/A"
+            lines.append(
+                f"  M={pt.batch_m_used:<8} | {pt.t_v_ms:<14.2f} | {1000/pt.t_v_ms:<12.2f} | "
+                f"{bw_str:<14} | {delta_str:<14} | {ovh_str:<12}"
+            )
 
         if report.simd_anomalies:
             lines.append("")
             for anom in report.simd_anomalies:
-                lines.append(f"  [SIMD Warning] {anom}")
+                lines.append(f"  [Anomaly] {anom}")
         lines.append("")
 
         # 4. Break-Even Analysis Table
         lines.append("[4. Speculative Break-Even & Net Acceleration Matrix]")
         lines.append(
-            f"  {'Draft (K)':<10} | {'Cycle Time':<12} | {'Break-Even α':<14} | "
-            f"{'Speedup (α=70%)':<16} | {'Speedup (α=80%)':<16} | {'Think Mode (α=15%)':<18}"
+            f"  {'Draft (K)':<10} | {'Cycle Time':<12} | {'Req Tokens (tau*)':<18} | {'Break-Even alpha':<18} | "
+            f"{'Speedup (alpha=70%)':<18} | {'Speedup (alpha=80%)':<18} | {'Think Mode (alpha=15%)':<20}"
         )
-        lines.append(f"  {'-'*10}-|-{'-'*12}-|-{'-'*14}-|-{'-'*16}-|-{'-'*16}-|-{'-'*18}")
+        lines.append(
+            f"  {'-'*10}-|-{'-'*12}-|-{'-'*18}-|-{'-'*18}-|-{'-'*18}-|-{'-'*18}-|-{'-'*20}"
+        )
 
         for k, pt in sorted(report.k_analysis.items()):
-            be_str = f"{pt.alpha_break_even * 100:.1f}%" if pt.can_ever_accelerate else "IMPOSSIBLE"
+            be_str = f"{pt.alpha_break_even * 100:.1f}%" if pt.alpha_break_even is not None else "IMPOSSIBLE"
+            tau_str = f"{pt.tau_star:.2f} tok/cyc"
             sp70_str = f"{pt.speedup_at_70_pct * 100:+.1f}%"
             sp80_str = f"{pt.speedup_at_80_pct * 100:+.1f}%"
             think_str = f"{pt.speedup_at_thinking_15_pct * 100:+.1f}%"
 
             marker = " *" if k == report.recommended_k_max else "  "
             lines.append(
-                f"  K={k:<7}{marker} | {pt.cycle_time_ms:<9.2f} ms | {be_str:<14} | "
-                f"{sp70_str:<16} | {sp80_str:<16} | {think_str:<18}"
+                f"  K={k:<7}{marker} | {pt.cycle_time_ms:<9.2f} ms | {tau_str:<18} | {be_str:<18} | "
+                f"{sp70_str:<18} | {sp80_str:<18} | {think_str:<20}"
             )
-        lines.append("  (* denotes recommended optimal configuration)")
+        lines.append("  (* denotes recommended optimal configuration; tau* = cycle_time / t_v(1) is model-free)")
         lines.append("")
 
         # 5. Prescriptions & Actionable Verdict

@@ -84,31 +84,32 @@ spec-doctor -m models/target.gguf -md models/draft.gguf --export-md report.md --
     - Drafter Cost td : 23.97 ms
 
 [3. Target Batch Verification Scaling Cost (M=1..8)]
-  Batch (M)  | Latency (ms)   | TPS (tok/s)  | Delta vs M=1   | Overhead (%) 
-  -----------|----------------|--------------|----------------|-------------
-  M=2        | 137.78         | 7.26         | +20.43 ms      | +17.4%      
-  M=3        | 284.79         | 3.51         | +167.44 ms     | +142.7%     
-  M=4        | 228.11         | 4.38         | +110.76 ms     | +94.4%      
-  M=5        | 809.03         | 1.24         | +691.68 ms     | +589.4%     
+  Batch (M)  | Latency (ms)   | TPS (tok/s)  | Achieved BW    | Delta vs M=1   | Overhead (%)
+  -----------|----------------|--------------|----------------|----------------|-------------
+  M=2        | 139.52         | 7.17         | 48.0 GB/s      | +10.58 ms      | +8.2%       
+  M=3        | 279.49         | 3.58         | 24.0 GB/s      | +150.55 ms     | +116.8%     
+  M=4        | 225.32         | 4.44         | 29.7 GB/s      | +96.39 ms      | +74.8%      
+  M=5        | 801.85         | 1.25         | 8.4 GB/s       | +672.92 ms     | +521.9%     
 
-  [SIMD Warning] Apple Silicon 3-Wide SIMD Penalty: M=3 (284.8ms) is SLOWER than M=4 (228.1ms). Avoid K=2!
+  [Anomaly] Non-monotonic verification latency: M=3 (279.5ms, 24.0 GB/s) is SLOWER than M=4 (225.3ms, 29.7 GB/s). Kernel multi-column dispatch/tiling inefficiency.
+  [Anomaly] Throughput collapse at M=5: achieved bandwidth fell to 8.4 GB/s (801.9ms), suggesting kernel fallback or register spill.
 
 [4. Speculative Break-Even & Net Acceleration Matrix]
-  Draft (K)  | Cycle Time   | Break-Even α   | Speedup (α=70%)  | Speedup (α=80%)  | Think Mode (α=15%)
-  -----------|--------------|----------------|------------------|------------------|-------------------
-  K=1         | 161.75    ms | 37.8%          | +23.3%           | +30.6%           | -16.6%            
-  K=2         | 308.76    ms | 81.6%          | -16.8%           | -7.3%            | -55.4%            
-  K=3       * | 252.08    ms | 38.3%          | +17.9%           | +37.4%           | -45.3%            
-  K=4         | 833.00    ms | IMPOSSIBLE     | -60.9%           | -52.6%           | -83.4%            
-  (* denotes recommended optimal configuration)
+  Draft (K)  | Cycle Time   | Req Tokens (tau*)  | Break-Even alpha   | Speedup (alpha=70%) | Speedup (alpha=80%) | Think Mode (alpha=15%)
+  -----------|--------------|--------------------|--------------------|--------------------|--------------------|---------------------
+  K=1         | 163.72    ms | 1.27 tok/cyc       | 27.0%              | +33.9%             | +41.8%             | -9.4%               
+  K=2         | 303.69    ms | 2.36 tok/cyc       | 76.7%              | -7.0%              | +3.6%              | -50.2%              
+  K=3       * | 249.52    ms | 1.94 tok/cyc       | 52.1%              | +30.9%             | +52.5%             | -39.2%              
+  K=4         | 826.05    ms | 6.41 tok/cyc       | IMPOSSIBLE         | -56.7%             | -47.5%             | -81.6%              
+  (* denotes recommended optimal configuration; tau* = cycle_time / t_v(1) is model-free)
 
 --------------------------------------------------------------------------------
 [5. Diagnostic Summary & Guidelines]
 --------------------------------------------------------------------------------
-  • Break-even acceptance rate: Speculative decoding requires alpha > 38.3% to be net-positive.
-  • Recommended draft length: Set --spec-draft-n-max 3 (Projected speedup: +37.4% at alpha=80%).
-  • SIMD Vectorization constraint: Avoid K=2 due to Apple Silicon 3-wide register penalty. Prefer K=3 or K=4.
-  • Reasoning (<think>) Mode: At alpha ~ 10-15%, unmanaged speculative decoding causes a -45.3% slowdown. Lock K=0 or enable dynamic circuit breaker during thinking generation.
+  • Break-even gate: Requires mean tokens per cycle >= 1.94 (geometric alpha >= 52.1%) for K=3.
+  • Recommended draft length: Set --spec-draft-n-max 3 (Projected speedup: +52.5% at alpha=80%).
+  • Disallowed draft lengths: Avoid K=[4] where target batch latency causes net slowdown regardless of acceptance rate.
+  • Reasoning (<think>) Mode: At alpha ~ 10-15%, unmanaged speculative decoding causes a -39.2% slowdown. Lock K=0 or enable a dynamic circuit breaker during thinking generation.
 
 [Recommended CLI Command]
   ./bin/llama-cli -m models/target.gguf \

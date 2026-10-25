@@ -18,6 +18,7 @@ class BatchVerifyPoint:
     tok_per_sec: float
     delta_vs_m1_ms: float
     overhead_pct: float
+    achieved_bw_gbps: float
     stddev_ms: float
 
 @dataclass
@@ -47,6 +48,7 @@ class ProfilingResult:
                     "tok_per_sec": round(v.tok_per_sec, 2),
                     "delta_vs_m1_ms": round(v.delta_vs_m1_ms, 2),
                     "overhead_pct": round(v.overhead_pct, 1),
+                    "achieved_bw_gbps": round(v.achieved_bw_gbps, 1),
                     "stddev_ms": round(v.stddev_ms, 2),
                 }
                 for k, v in self.batch_curve.items()
@@ -63,8 +65,18 @@ class SpecProfiler:
         self.llama_cli = self._resolve_binary(llama_cli_bin, "llama-cli")
 
     def _resolve_binary(self, candidate: str, name: str) -> str:
-        if os.path.exists(candidate) and os.access(candidate, os.X_OK):
-            return os.path.abspath(candidate)
+        candidates = [
+            candidate,
+            os.path.abspath(candidate),
+            os.path.expanduser(f"~/Ai_Agent/bin/{name}"),
+            os.path.expanduser(f"~/llama.cpp/build/bin/{name}"),
+            f"/usr/local/bin/{name}",
+            f"/opt/homebrew/bin/{name}",
+        ]
+        for c in candidates:
+            if os.path.exists(c) and os.access(c, os.X_OK):
+                return os.path.abspath(c)
+
         which_path = subprocess.run(["which", name], stdout=subprocess.PIPE, text=True).stdout.strip()
         if which_path and os.path.exists(which_path):
             return which_path
@@ -125,6 +137,7 @@ class SpecProfiler:
 
             delta_ms = lat_ms - m1_lat_ms if m1_lat_ms > 0 else 0.0
             overhead_pct = (delta_ms / m1_lat_ms * 100.0) if m1_lat_ms > 0 else 0.0
+            bw_gbps = (model_size_gb / (lat_ms / 1000.0)) if lat_ms > 0 else 0.0
 
             curve[m] = BatchVerifyPoint(
                 batch_m=m,
@@ -132,19 +145,22 @@ class SpecProfiler:
                 tok_per_sec=tps,
                 delta_vs_m1_ms=delta_ms,
                 overhead_pct=overhead_pct,
+                achieved_bw_gbps=bw_gbps,
                 stddev_ms=std_ms,
             )
 
-        # Detect non-power-of-2 SIMD anomalies (e.g. M=3 penalty on Apple Silicon)
+        # Detect non-monotonic or throughput collapse anomalies
         anomalies = []
-        if 3 in curve and 4 in curve:
-            if curve[3].latency_ms > curve[4].latency_ms:
+        if 3 in curve and 4 in curve and curve[3].latency_ms > curve[4].latency_ms:
+            bw3 = curve[3].achieved_bw_gbps
+            bw4 = curve[4].achieved_bw_gbps
+            anomalies.append(
+                f"Non-monotonic verification latency: M=3 ({curve[3].latency_ms:.1f}ms, {bw3:.1f} GB/s) is SLOWER than M=4 ({curve[4].latency_ms:.1f}ms, {bw4:.1f} GB/s). Kernel multi-column dispatch/tiling inefficiency."
+            )
+        for m, pt in sorted(curve.items()):
+            if m > 1 and pt.achieved_bw_gbps < (curve[1].achieved_bw_gbps * 0.3):
                 anomalies.append(
-                    f"Apple Silicon 3-Wide SIMD Penalty: M=3 ({curve[3].latency_ms:.1f}ms) is SLOWER than M=4 ({curve[4].latency_ms:.1f}ms). Avoid K=2!"
-                )
-            elif 2 in curve and (curve[3].latency_ms - curve[2].latency_ms) > 1.5 * (curve[4].latency_ms - curve[3].latency_ms):
-                anomalies.append(
-                    f"Non-linear M=3 jump: M=3 latency ({curve[3].latency_ms:.1f}ms) exhibits disproportionate step overhead vs M=2."
+                    f"Throughput collapse at M={m}: achieved bandwidth fell to {pt.achieved_bw_gbps:.1f} GB/s ({pt.latency_ms:.1f}ms), suggesting kernel fallback or register spill."
                 )
 
         return ProfilingResult(
@@ -152,7 +168,7 @@ class SpecProfiler:
             target_model_type=model_type,
             target_model_size_gb=model_size_gb,
             target_m1_latency_ms=m1_lat_ms,
-            target_m1_tps=curve.get(1, BatchVerifyPoint(1, m1_lat_ms, 1000/m1_lat_ms if m1_lat_ms else 0, 0, 0, 0)).tok_per_sec,
+            target_m1_tps=curve.get(1, BatchVerifyPoint(1, m1_lat_ms, 1000/m1_lat_ms if m1_lat_ms else 0, 0, 0, 0, 0)).tok_per_sec,
             batch_curve=curve,
             simd_anomaly_flags=anomalies,
         )
