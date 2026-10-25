@@ -39,8 +39,8 @@ If $\alpha < \alpha_{\text{break-even}}$, speculative decoding **actively slows 
 
 ### 1. Installation
 ```bash
-git clone https://github.com/nogeonwoo/Ai_Agent.git
-cd Ai_Agent
+git clone https://github.com/nogeonwoo/SpecDoctor.git
+cd SpecDoctor
 pip install -e .
 ```
 
