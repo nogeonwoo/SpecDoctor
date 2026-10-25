@@ -59,6 +59,57 @@ class ProfilingResult:
             "simd_anomaly_flags": self.simd_anomaly_flags,
         }
 
+def _parse_json_array(stdout: str) -> List[Dict[str, Any]]:
+    """Return the first valid JSON array of objects in stdout, tolerating text before AND after it."""
+    dec = json.JSONDecoder()
+    for i, ch in enumerate(stdout):
+        if ch != "[":
+            continue
+        try:
+            obj, _ = dec.raw_decode(stdout[i:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, list) and obj and isinstance(obj[0], dict):
+            return obj
+    raise ValueError(f"Could not find a JSON array of results in llama-bench output:\n{stdout[:500]}")
+
+
+def detect_batch_anomalies(curve: Dict[int, "BatchVerifyPoint"], rel_tol: float = 0.05) -> List[str]:
+    """
+    Cause-agnostic, noise-aware shape checks on the verification curve t_v(M).
+      1. Inversion: a larger batch finishes materially faster than the next-smaller one.
+      2. Worse-than-serial: t_v(M) > M * t_v(1), i.e. M independent single-token passes would be faster.
+    Both are physically implausible for a healthy kernel whatever its roofline position. The tool cannot
+    identify the cause (dispatch/tiling for specific column counts, register pressure, noise, ...).
+    """
+    flags: List[str] = []
+    if 1 not in curve:
+        return flags
+    t1 = curve[1].latency_ms
+    ms = sorted(curve)
+    for a, b in zip(ms, ms[1:]):
+        pa, pb = curve[a], curve[b]
+        if pa.latency_ms <= 0:
+            continue
+        noise = 4.0 * ((pa.stddev_ms ** 2 + pb.stddev_ms ** 2) ** 0.5) / pa.latency_ms  # 4 sigma of the difference
+        if pb.latency_ms < pa.latency_ms * (1.0 - max(rel_tol, noise)):
+            flags.append(
+                f"Non-monotonic verification latency: M={b} ({pb.latency_ms:.1f} ms) is "
+                f"{(1.0 - pb.latency_ms / pa.latency_ms) * 100:.0f}% faster than M={a} ({pa.latency_ms:.1f} ms). "
+                "Cause not identified by this tool; confirm with a same-architecture control and per-op timing."
+            )
+    for m in ms:
+        if m <= 1:
+            continue
+        pt = curve[m]
+        if pt.latency_ms > m * t1 * (1.0 + rel_tol):
+            flags.append(
+                f"M={m} ({pt.latency_ms:.1f} ms) is slower than {m} independent M=1 passes ({m * t1:.1f} ms): "
+                "a per-column fallback would beat this path. Cause not identified by this tool."
+            )
+    return flags
+
+
 class SpecProfiler:
     def __init__(self, llama_bench_bin: str = "./bin/llama-bench", llama_cli_bin: str = "./bin/llama-cli"):
         self.llama_bench = self._resolve_binary(llama_bench_bin, "llama-bench")
@@ -109,21 +160,16 @@ class SpecProfiler:
         if res.returncode != 0:
             raise RuntimeError(f"llama-bench failed (code {res.returncode}): {res.stderr}\n{res.stdout}")
 
-        # Parse JSON output (skip any Metal init lines before the JSON array)
-        stdout = res.stdout
-        json_start = stdout.find("[")
-        if json_start == -1:
-            raise ValueError(f"Could not find JSON array in llama-bench output:\n{stdout}")
-
-        data = json.loads(stdout[json_start:])
-        if not data:
-            raise ValueError("Empty JSON array returned by llama-bench")
+        data = _parse_json_array(res.stdout)
 
         model_type = data[0].get("model_type", "unknown")
-        model_size_gb = data[0].get("model_size", 0) / (1024 ** 3)
+        model_size_gb = data[0].get("model_size", 0) / 1e9  # decimal GB, comparable to vendor GB/s figures
 
         curve: Dict[int, BatchVerifyPoint] = {}
-        m1_lat_ms = 0.0
+        m1_rows = [e for e in data if e.get("n_prompt", 1) == 1 and e.get("avg_ns", 0) > 0]
+        if not m1_rows:
+            raise ValueError("llama-bench returned no usable M=1 (n_prompt=1) row; the M=1 baseline is required (include 1 in batch_sizes).")
+        m1_lat_ms = m1_rows[0]["avg_ns"] / 1e6
 
         for entry in data:
             m = entry.get("n_prompt", 1)
@@ -131,9 +177,6 @@ class SpecProfiler:
             lat_ms = avg_ns / 1e6
             std_ms = entry.get("stddev_ns", 0.0) / 1e6
             tps = entry.get("avg_ts", 0.0)
-
-            if m == 1:
-                m1_lat_ms = lat_ms
 
             delta_ms = lat_ms - m1_lat_ms if m1_lat_ms > 0 else 0.0
             overhead_pct = (delta_ms / m1_lat_ms * 100.0) if m1_lat_ms > 0 else 0.0
@@ -149,19 +192,7 @@ class SpecProfiler:
                 stddev_ms=std_ms,
             )
 
-        # Detect non-monotonic or throughput collapse anomalies
-        anomalies = []
-        if 3 in curve and 4 in curve and curve[3].latency_ms > curve[4].latency_ms:
-            bw3 = curve[3].achieved_bw_gbps
-            bw4 = curve[4].achieved_bw_gbps
-            anomalies.append(
-                f"Non-monotonic verification latency: M=3 ({curve[3].latency_ms:.1f}ms, {bw3:.1f} GB/s) is SLOWER than M=4 ({curve[4].latency_ms:.1f}ms, {bw4:.1f} GB/s). Kernel multi-column dispatch/tiling inefficiency."
-            )
-        for m, pt in sorted(curve.items()):
-            if m > 1 and pt.achieved_bw_gbps < (curve[1].achieved_bw_gbps * 0.3):
-                anomalies.append(
-                    f"Throughput collapse at M={m}: achieved bandwidth fell to {pt.achieved_bw_gbps:.1f} GB/s ({pt.latency_ms:.1f}ms), suggesting kernel fallback or register spill."
-                )
+        anomalies = detect_batch_anomalies(curve)
 
         return ProfilingResult(
             target_model_path=target_model,
@@ -244,4 +275,8 @@ class SpecProfiler:
             # Average across matches
             return sum(values) / len(values)
 
-        return 23.0  # empirical fallback default
+        raise RuntimeError(
+            "Could not parse 'total_td=<ms>' from llama-cli output. This needs a build that supports "
+            "--spec-type draft-dflash and prints dflash-timer lines under LLAMA_SPEC_DEBUG=1. "
+            "Pass the drafter cost explicitly with --td instead; no default is substituted."
+        )

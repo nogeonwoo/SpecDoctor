@@ -10,39 +10,40 @@
 
 [2. Evaluated Models & Baseline Latency]
   • Target Model      : Ternary-Bonsai-2-27B-PQ2_0.gguf
-    - Type & Size     : qwen35 27B PQ2_0 - 2.13 bpw (group 128) | 6.70 GB
-    - Baseline M=1    : 128.94 ms/token (7.76 tok/s)
+    - Type & Size     : qwen35 27B PQ2_0 - 2.13 bpw (group 128) | 7.20 GB (6.70 GiB)
+    - Baseline M=1    : 113.93 ms/token (8.78 tok/s)
   • Drafter Model     : Ternary-Bonsai-2-27B-DFlash2-ft5-asym-Q2_K-FC-FullRank.gguf
     - Drafter Type    : dflash_parallel
-    - Drafter Cost td : 24.20 ms
+    - Drafter Cost td : 23.85 ms
 
-[3. Target Batch Verification Scaling Cost (M=1..8)]
-  Batch (M)  | Latency (ms)   | TPS (tok/s)  | Achieved BW    | Delta vs M=1   | Overhead (%)
+[3. Target Batch Verification Cost, M = K+1 for each analysed K]
+  Batch (M)  | Latency (ms)   | Verify tok/s | Eff. BW (S/t)  | Delta vs M=1   | Overhead (%)
   -----------|----------------|--------------|----------------|----------------|-------------
-  M=2        | 139.52         | 7.17         | 48.0 GB/s      | +10.58 ms      | +8.2%       
-  M=3        | 279.49         | 3.58         | 24.0 GB/s      | +150.55 ms     | +116.8%     
-  M=4        | 225.32         | 4.44         | 29.7 GB/s      | +96.39 ms      | +74.8%      
-  M=5        | 801.85         | 1.25         | 8.4 GB/s       | +672.92 ms     | +521.9%     
+  M=2        | 137.73         | 14.52        | 52.2 GB/s      | +23.80 ms      | +20.9%      
+  M=3        | 266.38         | 11.26        | 27.0 GB/s      | +152.46 ms     | +133.8%     
+  M=4        | 220.59         | 18.13        | 32.6 GB/s      | +106.67 ms     | +93.6%      
+  M=5        | 788.85         | 6.34         | 9.1 GB/s       | +674.92 ms     | +592.4%     
+  Eff. BW = model_bytes / t_v(M): assumes one weight pass per verify step; a lower bound on bus traffic, not a counter reading.
 
-  [Anomaly] Non-monotonic verification latency: M=3 (279.5ms, 24.0 GB/s) is SLOWER than M=4 (225.3ms, 29.7 GB/s). Kernel multi-column dispatch/tiling inefficiency.
-  [Anomaly] Throughput collapse at M=5: achieved bandwidth fell to 8.4 GB/s (801.9ms), suggesting kernel fallback or register spill.
+  [Anomaly] Non-monotonic verification latency: M=4 (220.6 ms) is 17% faster than M=3 (266.4 ms). Cause not identified by this tool; confirm with a same-architecture control and per-op timing.
+  [Anomaly] M=5 (788.8 ms) is slower than 5 independent M=1 passes (569.6 ms): a per-column fallback would beat this path. Cause not identified by this tool.
 
 [4. Speculative Break-Even & Net Acceleration Matrix]
   Draft (K)  | Cycle Time   | Req Tokens (tau*)  | Break-Even alpha   | Speedup (alpha=70%) | Speedup (alpha=80%) | Think Mode (alpha=15%)
   -----------|--------------|--------------------|--------------------|--------------------|--------------------|---------------------
-  K=1         | 163.72    ms | 1.27 tok/cyc       | 27.0%              | +33.9%             | +41.8%             | -9.4%               
-  K=2         | 303.69    ms | 2.36 tok/cyc       | 76.7%              | -7.0%              | +3.6%              | -50.2%              
-  K=3       * | 249.52    ms | 1.94 tok/cyc       | 52.1%              | +30.9%             | +52.5%             | -39.2%              
-  K=4         | 826.05    ms | 6.41 tok/cyc       | IMPOSSIBLE         | -56.7%             | -47.5%             | -81.6%              
-  (* denotes recommended optimal configuration; tau* = cycle_time / t_v(1) is model-free)
+  K=1         | 161.58    ms | 1.42 tok/cyc       | 41.8%              | +19.9%             | +26.9%             | -18.9%              
+  K=2         | 290.23    ms | 2.55 tok/cyc       | 84.1%              | -14.0%             | -4.2%              | -54.0%              
+  K=3       * | 244.44    ms | 2.15 tok/cyc       | 59.1%              | +18.1%             | +37.6%             | -45.2%              
+  K=4         | 812.70    ms | 7.13 tok/cyc       | IMPOSSIBLE         | -61.1%             | -52.9%             | -83.5%              
+  (* = best tested K at the 75% reference alpha, shown only if net-positive there. tau* = cycle_time / t_v(1) needs no acceptance model; alpha = per-position acceptance under a geometric rollout)
 
 --------------------------------------------------------------------------------
 [5. Diagnostic Summary & Guidelines]
 --------------------------------------------------------------------------------
-  • Break-even gate: Requires mean tokens per cycle >= 1.94 (geometric alpha >= 52.1%) for K=3.
-  • Recommended draft length: Set --spec-draft-n-max 3 (Projected speedup: +52.5% at alpha=80%).
-  • Disallowed draft lengths: Avoid K=[4] where target batch latency causes net slowdown regardless of acceptance rate.
-  • Reasoning (<think>) Mode: At alpha ~ 10-15%, unmanaged speculative decoding causes a -39.2% slowdown. Lock K=0 or enable a dynamic circuit breaker during thinking generation.
+  • Break-even gate: requires >= 2.15 mean tokens per cycle for K=3 (geometric per-position alpha >= 59.1%; equivalently >= 38.2% accepted/drafted, the ratio llama.cpp prints).
+  • Recommended draft length: --spec-draft-n-max 3 (projected +37.6% at assumed alpha=80%; best tested K at the 75% reference alpha).
+  • Disallowed draft lengths: K=4 (required tokens per cycle exceed 1+K: net slowdown at any acceptance rate).
+  • Reasoning (<think>) mode: at an assumed, unmeasured alpha of 15%, K=3 yields -45.2%. Disable speculation (K=0) or use a runtime acceptance circuit-breaker while thinking.
 
 [Recommended CLI Command]
   ./bin/llama-cli -m /Users/ani/Ai_Agent/models/Ternary-Bonsai-2-27B-PQ2_0.gguf \

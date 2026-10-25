@@ -29,13 +29,14 @@ class DiagnosticReport:
     target_info: Dict[str, Any]
     drafter_info: Dict[str, Any]
     k_analysis: Dict[int, KAnalysisPoint] = field(default_factory=dict)
-    optimal_k_at_75_pct: int = 3
-    recommended_k_max: int = 3
-    critical_alpha_threshold: float = 0.55
-    critical_tau_star: float = 2.0
-    thinking_mode_speedup_loss_pct: float = -15.0
+    optimal_k_at_75_pct: int = 0
+    recommended_k_max: int = 0  # 0 == do not speculate
+    critical_alpha_threshold: Optional[float] = None
+    critical_tau_star: Optional[float] = None
+    thinking_mode_speedup_loss_pct: Optional[float] = None
     simd_anomalies: List[str] = field(default_factory=list)
     prescriptions: List[str] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -64,12 +65,13 @@ class DiagnosticReport:
             },
             "optimal_k_at_75_pct": self.optimal_k_at_75_pct,
             "recommended_k_max": self.recommended_k_max,
-            "critical_alpha_threshold": round(self.critical_alpha_threshold, 4),
-            "critical_alpha_threshold_pct": round(self.critical_alpha_threshold * 100, 1),
-            "critical_tau_star": round(self.critical_tau_star, 3),
-            "thinking_mode_speedup_loss_pct": round(self.thinking_mode_speedup_loss_pct, 1),
+            "critical_alpha_threshold": None if self.critical_alpha_threshold is None else round(self.critical_alpha_threshold, 4),
+            "critical_alpha_threshold_pct": None if self.critical_alpha_threshold is None else round(self.critical_alpha_threshold * 100, 1),
+            "critical_tau_star": None if self.critical_tau_star is None else round(self.critical_tau_star, 3),
+            "thinking_mode_speedup_loss_pct": None if self.thinking_mode_speedup_loss_pct is None else round(self.thinking_mode_speedup_loss_pct, 1),
             "simd_anomalies": self.simd_anomalies,
             "prescriptions": self.prescriptions,
+            "warnings": self.warnings,
         }
 
 def calculate_expected_tokens(k: int, alpha: float, model: str = "geometric") -> float:
@@ -92,13 +94,13 @@ def solve_geometric_alpha_break_even(k: int, tau_star: float) -> Optional[float]
 
     Returns:
       float in [0.0, 1.0] if break-even is physically achievable.
-      None if tau_star - 1.0 > k (impossible even at alpha = 1.0).
+      None if tau_star - 1.0 >= k (needs alpha = 1.0 exactly for zero gain: impossible).
     """
     target = tau_star - 1.0
     if target <= 0.0:
         return 0.0
-    if target > float(k):
-        return None  # Mathematically impossible
+    if target >= float(k):
+        return None  # tau* >= K+1: even alpha = 1 gives no net gain
 
     low, high = 0.0, 1.0
     for _ in range(40):
@@ -124,19 +126,25 @@ def analyze_speculative_dynamics(
         raise ValueError("Invalid target M=1 latency (<= 0)")
 
     tps_base = 1000.0 / t_v1
-    td_base = custom_td_ms if custom_td_ms is not None else (profile.drafter_latency_td_ms or 23.0)
+    td_base = custom_td_ms if custom_td_ms is not None else profile.drafter_latency_td_ms
+    if td_base is None or td_base < 0:
+        raise ValueError(
+            "Drafter latency t_d is unknown. Provide a drafter model or --td; "
+            "refusing to substitute an unmeasured default."
+        )
     is_autoregressive = (profile.drafter_type == "autoregressive")
 
     k_points: Dict[int, KAnalysisPoint] = {}
-    best_k_75 = 1
-    max_speedup_75 = -999.0
+    best_k_75 = 0          # 0 == do not speculate
+    max_speedup_75 = 0.0   # a K is recommended only if it beats baseline at the 75% reference alpha
+    warnings: List[str] = []
 
     for k in k_range:
         # Batch size for verifying K tokens is typically M = K + 1 (K draft tokens + 1 target continuation)
-        m_used = k + 1 if (k + 1) in profile.batch_curve else k
+        m_used = k + 1  # verifying K drafts + 1 bonus position
         if m_used not in profile.batch_curve:
-            avail = sorted(profile.batch_curve.keys())
-            m_used = avail[-1]
+            warnings.append(f"K={k} skipped: no M={m_used} measurement (refusing to substitute a different batch size).")
+            continue
 
         t_v_m = profile.batch_curve[m_used].latency_ms
         delta_tv = t_v_m - t_v1
@@ -147,10 +155,15 @@ def analyze_speculative_dynamics(
 
         # Model-free break-even required tokens per cycle
         tau_star = cycle_time / t_v1
+        if tau_star < 1.0:
+            warnings.append(
+                f"K={k}: tau*={tau_star:.3f} < 1 means t_d + t_v(M={m_used}) < t_v(1); non-physical, "
+                "likely a noisy or warm-up-contaminated M=1 measurement. Re-run before trusting this K."
+            )
 
         # Break-Even acceptance rate under identical geometric rollout model
         alpha_be = solve_geometric_alpha_break_even(k, tau_star)
-        can_accel = (alpha_be is not None and alpha_be < 1.0)
+        can_accel = alpha_be is not None
 
         # Helper to compute net speedup for a given alpha
         def get_speedup(alpha_val: float) -> float:
@@ -166,7 +179,7 @@ def analyze_speculative_dynamics(
         sp_90 = get_speedup(0.90)
         sp_think = get_speedup(0.15)  # 15% typical in <think> monologue
 
-        if sp_75 > max_speedup_75 and can_accel:
+        if can_accel and sp_75 > max_speedup_75:
             max_speedup_75 = sp_75
             best_k_75 = k
 
@@ -189,32 +202,45 @@ def analyze_speculative_dynamics(
 
     # Determine recommended K among achievable configurations
     rec_k = best_k_75
-    crit_alpha = k_points[rec_k].alpha_break_even if (rec_k in k_points and k_points[rec_k].alpha_break_even is not None) else 0.55
-    crit_tau = k_points[rec_k].tau_star if rec_k in k_points else 2.0
-    think_loss = k_points[rec_k].speedup_at_thinking_15_pct * 100.0 if rec_k in k_points else -15.0
+    rec_pt = k_points.get(rec_k)
+    crit_alpha = rec_pt.alpha_break_even if rec_pt else None
+    crit_tau = rec_pt.tau_star if rec_pt else None
+    think_loss = rec_pt.speedup_at_thinking_15_pct * 100.0 if rec_pt else None
 
     # Build actionable, non-contradictory prescriptions
     prescriptions = []
-    if not any(pt.can_ever_accelerate for pt in k_points.values()):
-        prescriptions.append(
-            "Critical: Drafter latency and target batch verification overhead exceed baseline single-token decode time. "
-            "Speculative decoding cannot accelerate this model on this hardware configuration (all draft lengths yield negative throughput)."
-        )
+    if rec_pt is None:
+        feasible = {k: pt.alpha_break_even for k, pt in k_points.items() if pt.can_ever_accelerate}
+        if not feasible:
+            prescriptions.append(
+                "Critical: no tested draft length can break even (required tokens per cycle exceed 1+K for every K). "
+                "Do not enable speculative decoding (K=0)."
+            )
+        else:
+            kb = min(feasible, key=feasible.get)
+            prescriptions.append(
+                f"No tested draft length is net-positive at the 75% reference acceptance. Lowest break-even: K={kb} "
+                f"at alpha >= {feasible[kb] * 100:.1f}%. Keep speculation off (K=0) unless measured acceptance exceeds that."
+            )
     else:
         prescriptions.append(
-            f"Break-even gate: Requires mean tokens per cycle >= {crit_tau:.2f} (geometric alpha >= {crit_alpha * 100:.1f}%) for K={rec_k}."
+            f"Break-even gate: requires >= {crit_tau:.2f} mean tokens per cycle for K={rec_k} "
+            f"(geometric per-position alpha >= {crit_alpha * 100:.1f}%; equivalently >= {(crit_tau - 1) / rec_k * 100:.1f}% "
+            "accepted/drafted, the ratio llama.cpp prints)."
         )
         prescriptions.append(
-            f"Recommended draft length: Set --spec-draft-n-max {rec_k} (Projected speedup: +{k_points[rec_k].speedup_at_80_pct * 100:.1f}% at alpha=80%)."
+            f"Recommended draft length: --spec-draft-n-max {rec_k} "
+            f"(projected {rec_pt.speedup_at_80_pct * 100:+.1f}% at assumed alpha=80%; best tested K at the 75% reference alpha)."
         )
         impossible_ks = [k for k, pt in k_points.items() if not pt.can_ever_accelerate]
         if impossible_ks:
             prescriptions.append(
-                f"Disallowed draft lengths: Avoid K={impossible_ks} where target batch latency causes net slowdown regardless of acceptance rate."
+                f"Disallowed draft lengths: K={', '.join(map(str, impossible_ks))} "
+                "(required tokens per cycle exceed 1+K: net slowdown at any acceptance rate)."
             )
         prescriptions.append(
-            f"Reasoning (<think>) Mode: At alpha ~ 10-15%, unmanaged speculative decoding causes a {think_loss:.1f}% slowdown. "
-            "Lock K=0 or enable a dynamic circuit breaker during thinking generation."
+            f"Reasoning (<think>) mode: at an assumed, unmeasured alpha of 15%, K={rec_k} yields {think_loss:+.1f}%. "
+            "Disable speculation (K=0) or use a runtime acceptance circuit-breaker while thinking."
         )
 
     return DiagnosticReport(
@@ -239,4 +265,5 @@ def analyze_speculative_dynamics(
         thinking_mode_speedup_loss_pct=think_loss,
         simd_anomalies=profile.simd_anomaly_flags,
         prescriptions=prescriptions,
+        warnings=warnings,
     )

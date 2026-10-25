@@ -33,19 +33,21 @@ class SpecReporter:
         # 2. Target & Drafter Profile
         lines.append("[2. Evaluated Models & Baseline Latency]")
         lines.append(f"  • Target Model      : {Path(tgt.get('model_path', '')).name}")
-        lines.append(f"    - Type & Size     : {tgt.get('model_type', 'unknown')} | {tgt.get('model_size_gb', 0):.2f} GB")
+        lines.append(f"    - Type & Size     : {tgt.get('model_type', 'unknown')} | {tgt.get('model_size_gb', 0):.2f} GB ({tgt.get('model_size_gb', 0) * 1e9 / 1024**3:.2f} GiB)")
         lines.append(f"    - Baseline M=1    : {tgt.get('m1_latency_ms', 0):.2f} ms/token ({tgt.get('m1_tps', 0):.2f} tok/s)")
         if dft.get("model_path"):
             lines.append(f"  • Drafter Model     : {Path(dft.get('model_path', '')).name}")
+        else:
+            lines.append("  • Drafter Model     : (none; td supplied manually)")
         lines.append(f"    - Drafter Type    : {dft.get('drafter_type', 'unknown')}")
         lines.append(f"    - Drafter Cost td : {dft.get('td_ms', 0):.2f} ms")
         lines.append("")
 
         # 3. Target Verification Batch Scaling Table
-        lines.append("[3. Target Batch Verification Scaling Cost (M=1..8)]")
+        lines.append("[3. Target Batch Verification Cost, M = K+1 for each analysed K]")
         lines.append(
-            f"  {'Batch (M)':<10} | {'Latency (ms)':<14} | {'TPS (tok/s)':<12} | "
-            f"{'Achieved BW':<14} | {'Delta vs M=1':<14} | {'Overhead (%)':<12}"
+            f"  {'Batch (M)':<10} | {'Latency (ms)':<14} | {'Verify tok/s':<12} | "
+            f"{'Eff. BW (S/t)':<14} | {'Delta vs M=1':<14} | {'Overhead (%)':<12}"
         )
         lines.append(
             f"  {'-'*10}-|-{'-'*14}-|-{'-'*12}-|-{'-'*14}-|-{'-'*14}-|-{'-'*12}"
@@ -57,18 +59,22 @@ class SpecReporter:
             if pt.batch_m_used in seen_batches:
                 continue
             seen_batches.add(pt.batch_m_used)
-            delta_str = f"+{pt.delta_tv_ms:.2f} ms"
-            ovh_str = f"+{(pt.delta_tv_ms / tgt.get('m1_latency_ms', 1.0) * 100):.1f}%"
+            delta_str = f"{pt.delta_tv_ms:+.2f} ms"
+            ovh_str = f"{(pt.delta_tv_ms / tgt.get('m1_latency_ms', 1.0) * 100):+.1f}%"
             bw_str = f"{(model_sz / (pt.t_v_ms / 1000.0)):.1f} GB/s" if pt.t_v_ms > 0 else "N/A"
+            tps_str = f"{pt.batch_m_used * 1000.0 / pt.t_v_ms:.2f}" if pt.t_v_ms > 0 else "N/A"
             lines.append(
-                f"  M={pt.batch_m_used:<8} | {pt.t_v_ms:<14.2f} | {1000/pt.t_v_ms:<12.2f} | "
+                f"  M={pt.batch_m_used:<8} | {pt.t_v_ms:<14.2f} | {tps_str:<12} | "
                 f"{bw_str:<14} | {delta_str:<14} | {ovh_str:<12}"
             )
 
+        lines.append("  Eff. BW = model_bytes / t_v(M): assumes one weight pass per verify step; a lower bound on bus traffic, not a counter reading.")
         if report.simd_anomalies:
             lines.append("")
             for anom in report.simd_anomalies:
                 lines.append(f"  [Anomaly] {anom}")
+        for w in report.warnings:
+            lines.append(f"  [Warning] {w}")
         lines.append("")
 
         # 4. Break-Even Analysis Table
@@ -93,7 +99,7 @@ class SpecReporter:
                 f"  K={k:<7}{marker} | {pt.cycle_time_ms:<9.2f} ms | {tau_str:<18} | {be_str:<18} | "
                 f"{sp70_str:<18} | {sp80_str:<18} | {think_str:<20}"
             )
-        lines.append("  (* denotes recommended optimal configuration; tau* = cycle_time / t_v(1) is model-free)")
+        lines.append("  (* = best tested K at the 75% reference alpha, shown only if net-positive there. tau* = cycle_time / t_v(1) needs no acceptance model; alpha = per-position acceptance under a geometric rollout)")
         lines.append("")
 
         # 5. Prescriptions & Actionable Verdict
@@ -108,12 +114,16 @@ class SpecReporter:
         tgt_file = tgt.get('model_path', 'target.gguf')
         dft_file = dft.get('model_path', 'draft.gguf') or "draft.gguf"
         lines.append("[Recommended CLI Command]")
-        lines.append(
-            f"  ./bin/llama-cli -m {tgt_file} \\\n"
-            f"                  -md {dft_file} \\\n"
-            f"                  --spec-draft-n-max {report.recommended_k_max} \\\n"
-            f"                  -ngl 999 -ngld 999 -t 4 --temp 0.0"
-        )
+        if report.recommended_k_max <= 0:
+            lines.append("  (speculative decoding not recommended for this configuration)")
+            lines.append(f"  ./bin/llama-cli -m {tgt_file} -ngl 999 -t 4 --temp 0.0")
+        else:
+            lines.append(
+                f"  ./bin/llama-cli -m {tgt_file} \\\n"
+                f"                  -md {dft_file} \\\n"
+                f"                  --spec-draft-n-max {report.recommended_k_max} \\\n"
+                f"                  -ngl 999 -ngld 999 -t 4 --temp 0.0"
+            )
         lines.append(border)
 
         return "\n".join(lines)

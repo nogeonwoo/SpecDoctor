@@ -5,25 +5,29 @@ Lightweight Roofline profiler and break-even latency analyzer for LLM speculativ
 ## Motivation
 
 Speculative decoding is often assumed to deliver linear speedups. In practice on memory-bandwidth-bound unified memory architectures:
-- The drafter model forward pass ($t_d$) competes for memory bus bandwidth.
-- Target verification latency ($t_v$) scales non-linearly with batch size, frequently encountering register-spill and non-power-of-2 SIMD penalties (e.g. 3-wide vectorization stalls).
-- In high-entropy generation or reasoning (`<think>`) phases, draft acceptance ($\alpha$) frequently falls below the physical break-even threshold ($\alpha_{\text{break-even}}$), resulting in net-negative throughput.
+- The drafter forward pass ($t_d$) is pure added latency in a serial draft→verify loop.
+- Target verification latency $t_v(M)$ is not flat in the batch size $M$: low-bit (dequantization-heavy) kernels turn compute-bound at small $M$, and custom kernels can have dispatch/tiling cliffs at specific column counts. `spec-doctor` measures the curve and flags shape anomalies without asserting their cause.
+- When draft acceptance ($\alpha$) is low (e.g. in reasoning phases), speculation can fall below break-even and lower throughput. The acceptance rates used in the tables are assumptions, not measurements.
 
-`spec-doctor` empirically profiles target model batch verification scaling across batch sizes $M = 1 \dots 8$, measures drafter latency, and computes the exact acceptance threshold required for net-positive acceleration.
+`spec-doctor` empirically profiles target model batch verification scaling across batch sizes $M = 1 \dots 8$, measures drafter latency, and computes the required tokens per cycle ($\tau^*$) and the corresponding acceptance threshold under a stated acceptance model.
 
 ## Analytical Formulation
 
-Speculative decoding provides acceleration ($\text{TPS}_{\text{spec}} > \text{TPS}_{\text{base}}$) if and only if:
+One speculative cycle drafts $K$ tokens (cost $t_d(K)$), then verifies $K+1$ positions in a single target pass (cost $t_v(K+1)$), and yields $1 + (\text{accepted drafts})$ tokens. Baseline decode yields one token per $t_v(1)$. Speculation breaks even when the mean tokens per cycle equals
 
-$$\alpha > \alpha_{\text{break-even}} = \frac{t_d(K) + \Delta t_v(K)}{K \cdot t_v(1)}$$
+$$\tau^* = \frac{t_d(K) + t_v(K+1)}{t_v(1)}$$
 
-Where:
-- $t_v(1)$: Target model single-token decode latency ($M=1$).
-- $t_d(K)$: Latency to draft $K$ tokens.
-- $\Delta t_v(K) = t_v(K+1) - t_v(1)$: Incremental target latency to verify $K$ tokens in batch.
-- $K \cdot t_v(1)$: Theoretical upper bound on time saved under 100% acceptance.
+and the net speedup is $\bar N/\tau^* - 1$, where $\bar N$ is the mean tokens per cycle. $\tau^*$ depends on no acceptance model.
 
-If $\alpha < \alpha_{\text{break-even}}$, speculation actively degrades generation speed. If $\alpha_{\text{break-even}} \ge 1.0$, speculative acceleration is mathematically impossible on that hardware configuration.
+To express $\tau^*$ as an acceptance rate we assume i.i.d. per-position acceptance $\alpha$ (geometric rollout), so $\bar N = 1 + \sum_{i=1}^{K}\alpha^i$. The break-even $\alpha$ is the unique root in $(0,1)$ of
+
+$$\sum_{i=1}^{K}\alpha^i = \tau^* - 1,$$
+
+found by bisection. A root exists iff $\tau^* < K+1$; otherwise speculation loses even at $\alpha = 1$.
+
+$\alpha$ is the *per-position* acceptance probability, not the accepted/drafted ratio that llama.cpp prints; the break-even for the latter is $(\tau^*-1)/K$.
+
+Assumptions: serial draft→verify with no overlap; the verification batch is exactly $K+1$ tokens (a truncated draft lands on a different $M$); no per-cycle overhead beyond $t_d$ and $t_v$; $t_v(M)$ measured with `llama-bench -p M` at zero context depth, which computes logits for the last position only.
 
 ## Installation
 
@@ -33,7 +37,7 @@ cd SpecDoctor
 pip install -e .
 ```
 
-Requires Python 3.9+ and macOS with `llama-bench` / `llama-cli` built locally or available in `$PATH`.
+Requires Python 3.9+ and macOS with `llama-bench` / `llama-cli` built locally or available in `$PATH`. Automatic drafter-cost measurement for DFlash drafters additionally needs a build that supports `--spec-type draft-dflash` and prints `dflash-timer ... total_td=... ms` under `LLAMA_SPEC_DEBUG=1`; otherwise pass `--td` (the tool never substitutes a default).
 
 ## Usage
 
@@ -54,7 +58,7 @@ spec-doctor -m models/target.gguf -md models/draft.gguf --export-md report.md --
 |---|---|---|
 | `-m, --target` | Path to target GGUF model (required) | - |
 | `-md, --draft` | Path to drafter GGUF model | None |
-| `--td` | Fixed drafter latency in ms | None |
+| `--td` | Drafter latency in ms per draft step (treated as independent of $K$ unless the drafter is an autoregressive GGUF passed via `-md`) | None |
 | `--k-max` | Maximum draft length $K$ to scan | 6 |
 | `-r, --repetitions`| Number of repetitions per batch size | 2 |
 | `-t, --threads` | Number of CPU threads | 4 |
@@ -77,47 +81,50 @@ spec-doctor -m models/target.gguf -md models/draft.gguf --export-md report.md --
 
 [2. Evaluated Models & Baseline Latency]
   • Target Model      : Ternary-Bonsai-2-27B-PQ2_0.gguf
-    - Type & Size     : qwen35 27B PQ2_0 | 6.70 GB
-    - Baseline M=1    : 117.35 ms/token (8.52 tok/s)
+    - Type & Size     : qwen35 27B PQ2_0 - 2.13 bpw (group 128) | 7.19 GB (6.70 GiB)
+    - Baseline M=1    : 128.94 ms/token (7.76 tok/s)
   • Drafter Model     : Ternary-Bonsai-2-27B-DFlash2-ft5-asym-Q2_K-FC-FullRank.gguf
     - Drafter Type    : dflash_parallel
-    - Drafter Cost td : 23.97 ms
+    - Drafter Cost td : 24.20 ms
 
-[3. Target Batch Verification Scaling Cost (M=1..8)]
-  Batch (M)  | Latency (ms)   | TPS (tok/s)  | Achieved BW    | Delta vs M=1   | Overhead (%)
+[3. Target Batch Verification Cost, M = K+1 for each analysed K]
+  Batch (M)  | Latency (ms)   | Verify tok/s | Eff. BW (S/t)  | Delta vs M=1   | Overhead (%)
   -----------|----------------|--------------|----------------|----------------|-------------
-  M=2        | 139.52         | 7.17         | 48.0 GB/s      | +10.58 ms      | +8.2%       
-  M=3        | 279.49         | 3.58         | 24.0 GB/s      | +150.55 ms     | +116.8%     
-  M=4        | 225.32         | 4.44         | 29.7 GB/s      | +96.39 ms      | +74.8%      
-  M=5        | 801.85         | 1.25         | 8.4 GB/s       | +672.92 ms     | +521.9%     
+  M=2        | 139.52         | 14.33        | 51.6 GB/s      | +10.58 ms      | +8.2%
+  M=3        | 279.49         | 10.73        | 25.7 GB/s      | +150.55 ms     | +116.8%
+  M=4        | 225.32         | 17.75        | 31.9 GB/s      | +96.38 ms      | +74.7%
+  M=5        | 801.85         | 6.24         | 9.0 GB/s       | +672.91 ms     | +521.9%
+  Eff. BW = model_bytes / t_v(M): assumes one weight pass per verify step; a lower bound on bus traffic, not a counter reading.
 
-  [Anomaly] Non-monotonic verification latency: M=3 (279.5ms, 24.0 GB/s) is SLOWER than M=4 (225.3ms, 29.7 GB/s). Kernel multi-column dispatch/tiling inefficiency.
-  [Anomaly] Throughput collapse at M=5: achieved bandwidth fell to 8.4 GB/s (801.9ms), suggesting kernel fallback or register spill.
+  [Anomaly] Non-monotonic verification latency: M=4 (225.3 ms) is 19% faster than M=3 (279.5 ms). Cause not identified by this tool; confirm with a same-architecture control and per-op timing.
+  [Anomaly] M=5 (801.9 ms) is slower than 5 independent M=1 passes (644.7 ms): a per-column fallback would beat this path. Cause not identified by this tool.
 
 [4. Speculative Break-Even & Net Acceleration Matrix]
   Draft (K)  | Cycle Time   | Req Tokens (tau*)  | Break-Even alpha   | Speedup (alpha=70%) | Speedup (alpha=80%) | Think Mode (alpha=15%)
   -----------|--------------|--------------------|--------------------|--------------------|--------------------|---------------------
-  K=1         | 163.72    ms | 1.27 tok/cyc       | 27.0%              | +33.9%             | +41.8%             | -9.4%               
-  K=2         | 303.69    ms | 2.36 tok/cyc       | 76.7%              | -7.0%              | +3.6%              | -50.2%              
-  K=3       * | 249.52    ms | 1.94 tok/cyc       | 52.1%              | +30.9%             | +52.5%             | -39.2%              
-  K=4         | 826.05    ms | 6.41 tok/cyc       | IMPOSSIBLE         | -56.7%             | -47.5%             | -81.6%              
-  (* denotes recommended optimal configuration; tau* = cycle_time / t_v(1) is model-free)
+  K=1         | 163.72    ms | 1.27 tok/cyc       | 27.0%              | +33.9%             | +41.8%             | -9.4%
+  K=2         | 303.69    ms | 2.36 tok/cyc       | 76.7%              | -7.0%              | +3.6%              | -50.2%
+  K=3       * | 249.52    ms | 1.94 tok/cyc       | 52.1%              | +30.9%             | +52.5%             | -39.2%
+  K=4         | 826.05    ms | 6.41 tok/cyc       | IMPOSSIBLE         | -56.7%             | -47.5%             | -81.6%
+  (* = best tested K at the 75% reference alpha, shown only if net-positive there. tau* = cycle_time / t_v(1) needs no acceptance model; alpha = per-position acceptance under a geometric rollout)
 
 --------------------------------------------------------------------------------
 [5. Diagnostic Summary & Guidelines]
 --------------------------------------------------------------------------------
-  • Break-even gate: Requires mean tokens per cycle >= 1.94 (geometric alpha >= 52.1%) for K=3.
-  • Recommended draft length: Set --spec-draft-n-max 3 (Projected speedup: +52.5% at alpha=80%).
-  • Disallowed draft lengths: Avoid K=[4] where target batch latency causes net slowdown regardless of acceptance rate.
-  • Reasoning (<think>) Mode: At alpha ~ 10-15%, unmanaged speculative decoding causes a -39.2% slowdown. Lock K=0 or enable a dynamic circuit breaker during thinking generation.
+  • Break-even gate: requires >= 1.94 mean tokens per cycle for K=3 (geometric per-position alpha >= 52.1%; equivalently >= 31.2% accepted/drafted, the ratio llama.cpp prints).
+  • Recommended draft length: --spec-draft-n-max 3 (projected +52.5% at assumed alpha=80%; best tested K at the 75% reference alpha).
+  • Disallowed draft lengths: K=4 (required tokens per cycle exceed 1+K: net slowdown at any acceptance rate).
+  • Reasoning (<think>) mode: at an assumed, unmeasured alpha of 15%, K=3 yields -39.2%. Disable speculation (K=0) or use a runtime acceptance circuit-breaker while thinking.
 
 [Recommended CLI Command]
-  ./bin/llama-cli -m models/target.gguf \
-                  -md models/draft.gguf \
+  ./bin/llama-cli -m models/Ternary-Bonsai-2-27B-PQ2_0.gguf \
+                  -md models/Ternary-Bonsai-2-27B-DFlash2-ft5-asym-Q2_K-FC-FullRank.gguf \
                   --spec-draft-n-max 3 \
                   -ngl 999 -ngld 999 -t 4 --temp 0.0
 ================================================================================
 ```
+
+Generated from a single measurement run (Apple M3, 24 GB).
 
 ## License
 
